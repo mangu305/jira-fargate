@@ -1,0 +1,13 @@
+# General
+.DS_Store
+*.log
+*.zip
+
+# AWS / local
+.aws/
+.aws-sam/
+.env
+*.env
+
+# GitLab CI artifacts
+.gitlab-ci.env

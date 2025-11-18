@@ -1,0 +1,55 @@
+image:
+  name: amazon/aws-cli:2.15.0
+  entrypoint: [""]
+
+stages:
+  - deploy
+
+variables:
+  CFN_STACK_NAME: "jira-fargate"
+
+before_script:
+  - echo "CI job running on $(uname -a)"
+  - aws --version
+  - aws sts get-caller-identity || true
+
+deploy:
+  stage: deploy
+  script:
+    # Require IRONBANK_IMAGE to be set and use it directly as the ImageUri passed to CloudFormation.
+    - |
+      if [ -z "$IRONBANK_IMAGE" ]; then
+        echo "ERROR: IRONBANK_IMAGE is not set. This pipeline only accepts Iron Bank images."
+        echo "Set the CI variable IRONBANK_IMAGE to the full image path (e.g. registry1.dso.mil/ironbank/<org>/jira:<tag>)."
+        exit 1
+      fi
+    - echo "Using Iron Bank image: $IRONBANK_IMAGE"
+    - |
+      aws cloudformation deploy \
+        --template-file cloudformation/jira-fargate.yml \
+        --stack-name "${CFN_STACK_NAME}" \
+        --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+        --parameter-overrides \
+          ImageUri="${IRONBANK_IMAGE}" \
+          ClusterName="${CLUSTER_NAME:-jira-cluster}" \
+          VpcId="${VPC_ID}" \
+          PrivateSubnets="${PRIVATE_SUBNETS}" \
+          TaskSecurityGroupIds="${TASK_SECURITY_GROUP_IDS}" \
+          TaskExecutionRoleArn="${TASK_EXECUTION_ROLE_ARN}" \
+          TaskRoleArn="${TASK_ROLE_ARN}" \
+          DatabaseEndpoint="${DB_ENDPOINT}" \
+          DatabasePort="${DB_PORT:-5432}" \
+          DatabaseName="${DB_NAME}" \
+          DatabaseCredentialsSecretArn="${DATABASE_CREDENTIALS_SECRET_ARN}" \
+          EfsFileSystemId="${EFS_FILESYSTEM_ID}" \
+          EfsAccessPointId="${EFS_ACCESS_POINT_ID}" \
+          AlbListenerArn="${ALB_LISTENER_ARN}" \
+          ListenerRulePathPattern="${LISTENER_RULE_PATH_PATTERN:-/jira*}" \
+          DesiredCount="${DESIRED_COUNT:-2}" \
+          ContainerCpu="${CONTAINER_CPU:-1024}" \
+          ContainerMemory="${CONTAINER_MEMORY:-2048}" \
+          RepositoryCredentialsSecretArn="${REPO_CREDENTIALS_SECRET_ARN:-}"
+  only:
+    - main
+    - master
+    - /^release\/.*$/

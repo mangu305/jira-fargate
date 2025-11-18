@@ -1,0 +1,231 @@
+```yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Deploy Jira to ECS Fargate. This template creates an ECS Cluster, TaskDefinition,
+  Service (Fargate), Target Group and Listener Rule. This version requires all secrets
+  (database credentials and optional private registry credentials) to be provided via
+  AWS Secrets Manager. The template no longer accepts DB username or password as plain
+  CloudFormation parameters.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: jira-cluster
+    Description: ECS cluster name to create
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC id
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of private subnets for Fargate tasks (comma delimited)
+  TaskSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security group(s) for the Fargate tasks (comma delimited)
+  TaskExecutionRoleArn:
+    Type: String
+    Description: Existing Task Execution Role ARN (for ECS task execution)
+  TaskRoleArn:
+    Type: String
+    Description: Existing Task Role ARN (task IAM role)
+  ImageUri:
+    Type: String
+    Default: "registry1.dso.mil/ironbank/<org>/jira:<tag>"
+    Description: Docker image URI to run for Jira (e.g. Iron Bank image like registry1.dso.mil/ironbank/<org>/jira:8.20.0)
+  ContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Jira container port
+  ContainerCpu:
+    Type: Number
+    Default: 1024
+    Description: CPU units for the task
+  ContainerMemory:
+    Type: Number
+    Default: 2048
+    Description: Memory (MiB) for the task
+  DesiredCount:
+    Type: Number
+    Default: 2
+  DatabaseEndpoint:
+    Type: String
+    Description: Aurora cluster endpoint (hostname) for Jira DB (used if DatabaseProxyEndpoint is not provided)
+  DatabasePort:
+    Type: Number
+    Default: 5432
+  DatabaseName:
+    Type: String
+    Default: jira
+  # Database credentials must come from Secrets Manager. See "Secrets format" below.
+  DatabaseCredentialsSecretArn:
+    Type: String
+    Description: >
+      ARN of AWS Secrets Manager secret that contains Jira DB credentials.
+      The secret must be a Secrets Manager secret (JSON) containing at minimum:
+        {"username":"jirauser","password":"secret"}
+      Alternatively you may include host/dbname in the secret, but at minimum username/password.
+    NoEcho: true
+  # Optional RDS Proxy / connection proxy endpoint. If provided, this will be used instead of DatabaseEndpoint.
+  DatabaseProxyEndpoint:
+    Type: String
+    Default: ""
+    Description: Optional DB proxy endpoint (e.g. an RDS Proxy endpoint). When non-empty it will be used in place of DatabaseEndpoint.
+  EfsFileSystemId:
+    Type: String
+    Description: Existing EFS FileSystemId for Jira home (required for Fargate)
+  EfsAccessPointId:
+    Type: String
+    Default: ""
+    Description: Optional EFS Access Point ID to use (recommended)
+  AlbListenerArn:
+    Type: String
+    Description: ARN of existing ALB listener to attach a listener rule to
+  ListenerRulePathPattern:
+    Type: String
+    Default: /jira*
+    Description: Path pattern for ALB listener rule (example: /jira*)
+  RepositoryCredentialsSecretArn:
+    Type: String
+    Default: ""
+    Description: (Optional) ARN of an AWS Secrets Manager secret that contains registry credentials for a private registry (used as repositoryCredentials.CredentialsParameter in the task definition)
+
+Conditions:
+  HasAccessPoint: !Not [ !Equals [ !Ref EfsAccessPointId, "" ] ]
+  HasRepoCreds: !Not [ !Equals [ !Ref RepositoryCredentialsSecretArn, "" ] ]
+  HasDatabaseProxy: !Not [ !Equals [ !Ref DatabaseProxyEndpoint, "" ] ]
+
+Resources:
+  JiraEcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  JiraLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/jira-${ClusterName}"
+      RetentionInDays: 14
+
+  JiraTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "jira-tg-${ClusterName}"
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /status
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  JiraListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref AlbListenerArn
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - !Ref ListenerRulePathPattern
+      Priority: 100
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref JiraTargetGroup
+
+  JiraTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: jira-task
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref TaskExecutionRoleArn
+      TaskRoleArn: !Ref TaskRoleArn
+      ContainerDefinitions:
+        - Name: jira
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          Environment:
+            - Name: ATL_DB_HOST
+              Value: !If
+                - HasDatabaseProxy
+                - !Ref DatabaseProxyEndpoint
+                - !Ref DatabaseEndpoint
+            - Name: ATL_DB_PORT
+              Value: !Ref DatabasePort
+            - Name: ATL_DB_NAME
+              Value: !Ref DatabaseName
+          Secrets:
+            - Name: ATL_DB_USER
+              # ValueFrom must point to the Secrets Manager secret JSON key containing the DB username.
+              # Format: <secret-arn>:SecretString:<json-key>::
+              ValueFrom: !Sub "${DatabaseCredentialsSecretArn}:SecretString:username::"
+            - Name: ATL_DB_PASSWORD
+              ValueFrom: !Sub "${DatabaseCredentialsSecretArn}:SecretString:password::"
+          # If registry requires credentials (private registry like Iron Bank private repo),
+          # provide the Secrets Manager secret ARN via RepositoryCredentialsSecretArn parameter.
+          # The RepositoryCredentials.CredentialsParameter expects the ARN of a secret that contains
+          # the registry auth (per ECS Secrets Manager integration).
+          RepositoryCredentials: !If
+            - HasRepoCreds
+            - CredentialsParameter: !Ref RepositoryCredentialsSecretArn
+            - !Ref "AWS::NoValue"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref JiraLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: jira
+          MountPoints:
+            - SourceVolume: jira-home
+              ContainerPath: /var/atlassian/application-data/jira
+              ReadOnly: false
+      Volumes:
+        - Name: jira-home
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EfsFileSystemId
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !If
+                - HasAccessPoint
+                - !Ref EfsAccessPointId
+                - !Ref "AWS::NoValue"
+
+  JiraService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub "jira-service-${ClusterName}"
+      Cluster: !Ref JiraEcsCluster
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: "1.4.0"
+      TaskDefinition: !Ref JiraTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnets
+          SecurityGroups: !Ref TaskSecurityGroupIds
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: jira
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref JiraTargetGroup
+
+Outputs:
+  ClusterName:
+    Description: ECS cluster name
+    Value: !Ref JiraEcsCluster
+  ServiceName:
+    Description: ECS Fargate service name
+    Value: !GetAtt JiraService.Name
+  TargetGroupArn:
+    Description: The target group ARN created for Jira
+    Value: !Ref JiraTargetGroup
+  ListenerRuleArn:
+    Description: ALB listener rule ARN
+    Value: !Ref JiraListenerRule
+```
