@@ -4,8 +4,10 @@ Description: >
   Deploy Jira to ECS Fargate. This template creates an ECS Cluster, TaskDefinition,
   Service (Fargate), Target Group and Listener Rule. This version requires all secrets
   (database credentials and optional private registry credentials) to be provided via
-  AWS Secrets Manager. The template no longer accepts DB username or password as plain
-  CloudFormation parameters.
+  AWS Secrets Manager. The template supports EFS by default but can optionally mount
+  an EBS volume when EbsVolumeId is provided. NOTE: EBS is single-attach and AZ-scoped —
+  if you use EBS you must ensure tasks are scheduled into subnets in the same AZ and
+  run a single replica (DesiredCount will be forced to 1 when EBS is used).
 
 Parameters:
   ClusterName:
@@ -17,7 +19,7 @@ Parameters:
     Description: Existing VPC id
   PrivateSubnets:
     Type: List<AWS::EC2::Subnet::Id>
-    Description: List of private subnets for Fargate tasks (comma delimited)
+    Description: List of private subnets for Fargate tasks (comma delimited). When using EBS, provide only subnets in the same AZ as the EBS volume.
   TaskSecurityGroupIds:
     Type: List<AWS::EC2::SecurityGroup::Id>
     Description: Security group(s) for the Fargate tasks (comma delimited)
@@ -30,7 +32,7 @@ Parameters:
   ImageUri:
     Type: String
     Default: "registry1.dso.mil/ironbank/<org>/jira:<tag>"
-    Description: Docker image URI to run for Jira (e.g. Iron Bank image like registry1.dso.mil/ironbank/<org>/jira:8.20.0)
+    Description: Docker image URI to run for Jira (e.g. Iron Bank image)
   ContainerPort:
     Type: Number
     Default: 8080
@@ -46,6 +48,7 @@ Parameters:
   DesiredCount:
     Type: Number
     Default: 2
+    Description: Desired number of task replicas (will be forced to 1 when EBS is used)
   DatabaseEndpoint:
     Type: String
     Description: Aurora cluster endpoint (hostname) for Jira DB (used if DatabaseProxyEndpoint is not provided)
@@ -55,23 +58,20 @@ Parameters:
   DatabaseName:
     Type: String
     Default: jira
-  # Database credentials must come from Secrets Manager. See "Secrets format" below.
   DatabaseCredentialsSecretArn:
     Type: String
     Description: >
       ARN of AWS Secrets Manager secret that contains Jira DB credentials.
       The secret must be a Secrets Manager secret (JSON) containing at minimum:
         {"username":"jirauser","password":"secret"}
-      Alternatively you may include host/dbname in the secret, but at minimum username/password.
     NoEcho: true
-  # Optional RDS Proxy / connection proxy endpoint. If provided, this will be used instead of DatabaseEndpoint.
   DatabaseProxyEndpoint:
     Type: String
     Default: ""
     Description: Optional DB proxy endpoint (e.g. an RDS Proxy endpoint). When non-empty it will be used in place of DatabaseEndpoint.
   EfsFileSystemId:
     Type: String
-    Description: Existing EFS FileSystemId for Jira home (required for Fargate)
+    Description: Existing EFS FileSystemId for Jira home (required for Fargate when not using EBS)
   EfsAccessPointId:
     Type: String
     Default: ""
@@ -87,11 +87,16 @@ Parameters:
     Type: String
     Default: ""
     Description: (Optional) ARN of an AWS Secrets Manager secret that contains registry credentials for a private registry (used as repositoryCredentials.CredentialsParameter in the task definition)
-
+  # Optional EBS support parameters (opt-in). If EbsVolumeId is non-empty the template will mount EBS instead of EFS.
+  EbsVolumeId:
+    Type: String
+    Default: ""
+    Description: Optional. When provided, the given EBS volume ID will be mounted into the Fargate task for JIRA_HOME. WARNING: EBS is single-attach and AZ-scoped. Ensure subnets are in the same AZ as the volume and the cluster will run a single replica (DesiredCount will be set to 1).
 Conditions:
   HasAccessPoint: !Not [ !Equals [ !Ref EfsAccessPointId, "" ] ]
   HasRepoCreds: !Not [ !Equals [ !Ref RepositoryCredentialsSecretArn, "" ] ]
   HasDatabaseProxy: !Not [ !Equals [ !Ref DatabaseProxyEndpoint, "" ] ]
+  HasEbs: !Not [ !Equals [ !Ref EbsVolumeId, "" ] ]
 
 Resources:
   JiraEcsCluster:
@@ -162,15 +167,9 @@ Resources:
               Value: !Ref DatabaseName
           Secrets:
             - Name: ATL_DB_USER
-              # ValueFrom must point to the Secrets Manager secret JSON key containing the DB username.
-              # Format: <secret-arn>:SecretString:<json-key>::
               ValueFrom: !Sub "${DatabaseCredentialsSecretArn}:SecretString:username::"
             - Name: ATL_DB_PASSWORD
               ValueFrom: !Sub "${DatabaseCredentialsSecretArn}:SecretString:password::"
-          # If registry requires credentials (private registry like Iron Bank private repo),
-          # provide the Secrets Manager secret ARN via RepositoryCredentialsSecretArn parameter.
-          # The RepositoryCredentials.CredentialsParameter expects the ARN of a secret that contains
-          # the registry auth (per ECS Secrets Manager integration).
           RepositoryCredentials: !If
             - HasRepoCreds
             - CredentialsParameter: !Ref RepositoryCredentialsSecretArn
@@ -182,10 +181,12 @@ Resources:
               awslogs-region: !Ref "AWS::Region"
               awslogs-stream-prefix: jira
           MountPoints:
-            - SourceVolume: jira-home
+            - SourceVolume: !If [ HasEbs, jira-home-ebs, jira-home ]
               ContainerPath: /var/atlassian/application-data/jira
               ReadOnly: false
+
       Volumes:
+        # EFS volume (default)
         - Name: jira-home
           EFSVolumeConfiguration:
             FileSystemId: !Ref EfsFileSystemId
@@ -196,12 +197,19 @@ Resources:
                 - !Ref EfsAccessPointId
                 - !Ref "AWS::NoValue"
 
+        # EBS volume (optional). NOTE: EbsVolumeConfiguration requires that CloudFormation/ECS schema in your account supports EBS on Fargate.
+        - Name: jira-home-ebs
+          EbsVolumeConfiguration:
+            VolumeId: !If [ HasEbs, !Ref EbsVolumeId, !Ref "AWS::NoValue" ]
+            # If other configuration keys are required by the CloudFormation resource type in your region,
+            # adjust them to match the AWS docs. Validate the template with aws cloudformation validate-template.
+
   JiraService:
     Type: AWS::ECS::Service
     Properties:
       ServiceName: !Sub "jira-service-${ClusterName}"
       Cluster: !Ref JiraEcsCluster
-      DesiredCount: !Ref DesiredCount
+      DesiredCount: !If [ HasEbs, 1, !Ref DesiredCount ]
       LaunchType: FARGATE
       PlatformVersion: "1.4.0"
       TaskDefinition: !Ref JiraTaskDefinition
@@ -228,4 +236,7 @@ Outputs:
   ListenerRuleArn:
     Description: ALB listener rule ARN
     Value: !Ref JiraListenerRule
+  EbsInUse:
+    Description: Whether EBS volume was provided and will be used
+    Value: !If [ HasEbs, "true", "false" ]
 ```

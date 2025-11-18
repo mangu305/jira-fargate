@@ -1,39 +1,21 @@
-```markdown
-# Secrets Manager formats
+# Secrets format
 
-This document describes the Secrets Manager JSON shapes required by the CloudFormation template.
+This project expects certain secrets to be stored in AWS Secrets Manager.
 
-1) Database credentials secret (required)
-- Parameter name passed to CloudFormation: DatabaseCredentialsSecretArn
-- Secret string (JSON) minimum keys:
-  {
-    "username": "jirauser",
-    "password": "your-db-password"
-  }
+1) Database credentials (required)
+- Create a Secrets Manager secret that contains at minimum:
+  {"username":"jirauser","password":"supersecret"}
+- Save the secret ARN and provide it to the pipeline via the CI variable:
+  DATABASE_CREDENTIALS_SECRET_ARN
 
-You can also include host/dbname:
-  {
-    "username": "jirauser",
-    "password": "your-db-password",
-    "host": "db.example.local",
-    "dbname": "jira"
-  }
+2) (Optional) Repository credentials for private registries (e.g. Iron Bank private repo)
+- Create a secret that contains registry auth compatible with ECS repository credentials.
+  Example JSON:
+    {"username":"registry-user","password":"registry-password"}
+- Provide the ARN via REPO_CREDENTIALS_SECRET_ARN in CI.
 
-2) Repository credentials secret (optional)
-- Parameter name passed to CloudFormation: RepositoryCredentialsSecretArn
-- ECS expects the secret to contain registry credentials (username/password). Provide JSON:
-  {
-    "username": "registry-username",
-    "password": "registry-password"
-  }
-
-Creating secrets via AWS CLI (examples)
-- Create DB secret:
-  aws secretsmanager create-secret --name jira/db-credentials --secret-string '{"username":"jirauser","password":"supersecret"}' --region us-east-1
-
-- Create repo credentials secret:
-  aws secretsmanager create-secret --name jira/registry-credentials --secret-string '{"username":"reguser","password":"regpass"}' --region us-east-1
-
-Permissions
-- Ensure the Task Execution Role (and CloudFormation deployment role if different) has permission to read the secrets (secretsmanager:GetSecretValue) as required.
-```
+Notes:
+- The CloudFormation template uses Secrets Manager ValueFrom mappings in the TaskDefinition:
+  - ATL_DB_USER -> ${DatabaseCredentialsSecretArn}:SecretString:username::
+  - ATL_DB_PASSWORD -> ${DatabaseCredentialsSecretArn}:SecretString:password::
+- Do not include plaintext passwords in CloudFormation parameters or repository files.

@@ -19,7 +19,13 @@ Required GitLab CI/CD variables
 - REPO_CREDENTIALS_SECRET_ARN (optional, if the Iron Bank registry requires Secrets Manager credentials)
 
 Important notes
-- Fargate cannot use EBS; the template mounts Jira home from EFS.
+- Fargate supports EFS by default (recommended) but this code provides an optional EBS mounting branch if you pass EBS_VOLUME_ID.
+- If you use EBS:
+  - The template will mount the provided EBS volume instead of EFS and will force DesiredCount to 1 to avoid multi-attach problems.
+  - Ensure your PRIVATE_SUBNETS are constrained to the AZ where the EBS volume exists.
+  - Plan backups and failover: EBS volumes are AZ-scoped and usually single-attach.
+- For most cases (multi-node, Data Center, HA) use EFS.
+
 - All credentials (DB username/password and optional registry credentials) must be stored in AWS Secrets Manager and provided as secret ARNs to the CloudFormation deployment (see docs/secrets.md).
 - Ensure your task role and execution role have appropriate permissions to access Secrets Manager and EFS.
 
@@ -28,5 +34,5 @@ How to create the repository zip
   chmod +x create-zip.sh
   ./create-zip.sh jira-ecs-fargate-ironbank.zip
 
-See docs/usage.md for detailed usage instructions and examples.
+See docs/usage.md for full instructions and the meaning of the new EBS variables.``
 ```

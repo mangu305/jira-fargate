@@ -41,6 +41,7 @@ deploy:
           DatabasePort="${DB_PORT:-5432}" \
           DatabaseName="${DB_NAME}" \
           DatabaseCredentialsSecretArn="${DATABASE_CREDENTIALS_SECRET_ARN}" \
+          DatabaseProxyEndpoint="${DATABASE_PROXY_ENDPOINT:-}" \
           EfsFileSystemId="${EFS_FILESYSTEM_ID}" \
           EfsAccessPointId="${EFS_ACCESS_POINT_ID}" \
           AlbListenerArn="${ALB_LISTENER_ARN}" \
@@ -48,7 +49,8 @@ deploy:
           DesiredCount="${DESIRED_COUNT:-2}" \
           ContainerCpu="${CONTAINER_CPU:-1024}" \
           ContainerMemory="${CONTAINER_MEMORY:-2048}" \
-          RepositoryCredentialsSecretArn="${REPO_CREDENTIALS_SECRET_ARN:-}"
+          RepositoryCredentialsSecretArn="${REPO_CREDENTIALS_SECRET_ARN:-}" \
+          EbsVolumeId="${EBS_VOLUME_ID:-}"
   only:
     - main
     - master

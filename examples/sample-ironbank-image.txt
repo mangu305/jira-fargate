@@ -1,4 +1,5 @@
 #### This is what the ironbank variable should look like
+#### We need an ironbank image or else the pipeline will fail
 
 
 registry1.dso.mil/ironbank/my-org/jira:8.20.0
